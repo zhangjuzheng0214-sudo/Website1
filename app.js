@@ -36,12 +36,14 @@
   let mode = 'tree';
   let parseTimer = null;
   let fixMap = new Map();
+  let fixLines = new Set();
 
   // ---------- helpers ----------
   function esc(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
   function pathKey(p) { return p.join('\u0000'); }
+  function lineOf(text, pos) { return text.slice(0, Math.max(0, pos || 0)).split('\n').length; }
 
   function toast(msg, isErr) {
     toastEl.textContent = msg;
@@ -121,13 +123,19 @@
     if (errorLine > total) errorLine = total;
 
     highlightCode.innerHTML = lines.map((ln, idx) => {
-      const cls = (idx + 1 === errorLine) ? 'hl-line err' : 'hl-line';
+      const n = idx + 1;
+      let cls = 'hl-line';
+      if (n === errorLine) cls += ' err';
+      else if (fixLines.has(n)) cls += ' fixline';
       return '<div class="' + cls + '">' + highlightLine(ln) + '</div>';
     }).join('');
 
     gutter.innerHTML = lines.map((_, idx) => {
-      const cls = (idx + 1 === errorLine) ? 'ln err' : 'ln';
-      return '<div class="' + cls + '">' + (idx + 1) + '</div>';
+      const n = idx + 1;
+      let cls = 'ln';
+      if (n === errorLine) cls += ' err';
+      else if (fixLines.has(n)) cls += ' fix';
+      return '<div class="' + cls + '">' + n + '</div>';
     }).join('');
 
     charCount.textContent = text.length;
@@ -136,7 +144,6 @@
   }
 
   function markErrorLine(line) { errorLine = line || 0; renderEditor(); }
-  function clearErrorLine() { if (errorLine !== 0) { errorLine = 0; renderEditor(); } }
 
   // ---------- cursor position ----------
   function updateCursor() {
@@ -157,7 +164,7 @@
     let failMsg = '';
 
     function addFix(type, path, message) {
-      fixes.push({ type: type, path: path.slice(), message: message });
+      fixes.push({ type: type, path: path.slice(), message: message, pos: i });
     }
 
     function skipWs(path) {
@@ -375,16 +382,41 @@
   }
   function span(cls, text) { return el('span', cls, text); }
 
-  function applyFix(node, path) {
-    const fx = fixMap.get(pathKey(path));
-    if (fx && fx.length) {
-      node.classList.add('fixed');
-      const t = fx.map((f) => 'Auto-fixed: ' + f.message).join('\n');
-      node.title = t;
-      const mark = el('span', 'fix-mark', '!');
-      mark.title = t;
-      node.insertBefore(mark, node.firstChild);
+  // map a fix record to the red token that should be shown inline
+  function fixSpec(f) {
+    const t = f.type;
+    const m = f.message || '';
+    if (t === 'missing-comma') return { tok: ',', mode: 'add' };
+    if (t === 'trailing-comma') return { tok: ',', mode: 'remove' };
+    if (t === 'duplicate-comma') return { tok: ',', mode: 'remove' };
+    if (t === 'missing-colon') return { tok: ':', mode: 'add' };
+    if (t === 'single-quote') return { tok: '"', mode: 'add' };
+    if (t === 'unquoted-key') return { tok: '"', mode: 'add' };
+    if (t === 'unquoted-value') return { tok: /\bnull\b/i.test(m) ? 'null' : '"', mode: 'add' };
+    if (t === 'unterminated') {
+      if (/string/i.test(m)) return { tok: '"', mode: 'add' };
+      return { tok: m.indexOf(']') !== -1 ? ']' : '}', mode: 'add' };
     }
+    if (t === 'comment') return { tok: '//', mode: 'remove' };
+    if (t === 'bad-number') return { tok: '0', mode: 'add' };
+    if (t === 'trailing-garbage') return { tok: '\u2026', mode: 'remove' };
+    return { tok: '!', mode: 'add' };
+  }
+
+  function applyFix(node, path, target) {
+    const fx = fixMap.get(pathKey(path));
+    if (!fx || !fx.length) return;
+    node.classList.add('has-fix');
+    const host = target || node;
+    const tips = [];
+    fx.forEach((f) => {
+      tips.push(f.message);
+      const spec = fixSpec(f);
+      const s = el('span', 'fix-token' + (spec.mode === 'remove' ? ' fix-remove' : ''), spec.tok);
+      s.title = f.message;
+      host.appendChild(s);
+    });
+    node.title = 'Auto-fixed:\n\u2022 ' + tips.join('\n\u2022 ');
   }
 
   function renderValue(value, path) {
@@ -427,7 +459,7 @@
     if (trailingComma) foot.appendChild(span('tk-punct', ','));
     wrap.appendChild(foot);
 
-    applyFix(wrap, path);
+    applyFix(wrap, path, foot);
     tg.addEventListener('click', () => {
       const collapsed = wrap.classList.toggle('collapsed');
       tg.textContent = collapsed ? '▶' : '▼';
@@ -537,6 +569,7 @@
     if (text.trim() === '') {
       tree.innerHTML = '';
       errorLine = 0;
+      fixLines = new Set();
       renderEditor();
       setStatus('Empty input — paste some JSON.', '');
       emptyHint.hidden = false;
@@ -547,14 +580,20 @@
       lastFormatted = JSON.stringify(res.value, null, 2);
       renderTree(res.value, res.fixes);
       showTree();
-      clearErrorLine();
+      errorLine = 0;
+      fixLines = new Set();
+      (res.fixes || []).forEach((f) => {
+        if (typeof f.pos === 'number') fixLines.add(lineOf(text, f.pos));
+      });
+      renderEditor();
       const fx = res.fixes ? res.fixes.length : 0;
       if (fx > 0) {
-        setStatus('Auto-repaired ' + fx + ' issue' + (fx > 1 ? 's' : '') + ' — highlighted in yellow on the right.', 'warn');
+        setStatus('Auto-repaired ' + fx + ' issue' + (fx > 1 ? 's' : '') + ' — red marks show what was fixed.', 'warn');
       } else {
         setStatus('Valid JSON — ' + countKeys(res.value) + ' keys formatted.', 'ok');
       }
     } else {
+      fixLines = new Set();
       const e = parseJSON(text);
       const err = (e.ok ? null : e.error) || { line: 0, col: 0, msg: (res.error && res.error.msg) || 'Invalid JSON' };
       markErrorLine(err.line);
@@ -686,6 +725,7 @@
     input.value = '';
     tree.innerHTML = '';
     errorLine = 0;
+    fixLines = new Set();
     renderEditor();
     setStatus('Cleared.', '');
     emptyHint.hidden = false;

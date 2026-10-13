@@ -214,6 +214,10 @@ body {
 .highlight code { font: inherit; }
 .hl-line { min-height: var(--line-h); }
 .hl-line.err { background: var(--danger-bg); display: block; border-radius: 2px; }
+.hl-line.fixline { background: rgba(229, 72, 77, .10); display: block; border-radius: 2px; box-shadow: inset 3px 0 0 rgba(229, 72, 77, .55); }
+[data-theme="dark"] .hl-line.fixline { background: rgba(255, 123, 114, .12); box-shadow: inset 3px 0 0 rgba(255, 123, 114, .6); }
+.gutter .ln.fix { color: #e5484d; font-weight: 600; }
+[data-theme="dark"] .gutter .ln.fix { color: #ff7b72; }
 
 /* token colors */
 .tk-key { color: var(--tk-key); }
@@ -236,8 +240,8 @@ body {
 .status-msg { color: var(--text-2); }
 .status-msg.err { color: var(--danger); font-weight: 500; }
 .status-msg.ok { color: var(--ok); }
-.status-msg.warn { color: #b5730a; font-weight: 500; }
-[data-theme="dark"] .status-msg.warn { color: #f0b45c; }
+.status-msg.warn { color: #e5484d; font-weight: 500; }
+[data-theme="dark"] .status-msg.warn { color: #ff7b72; }
 .status-meta { color: var(--text-3); white-space: nowrap; }
 
 /* ===== Panel action ===== */
@@ -277,36 +281,36 @@ body {
 .jnode.collapsed > .jfoot { display: none; }
 .jpreview { color: var(--text-3); }
 
-/* auto-repaired node highlight */
-.jrow.fixed, .jnode.fixed > .jhead {
-  background: #fff6d6;
-  border-radius: 3px;
-  box-shadow: inset 0 0 0 1px #f4d97a;
-}
-[data-theme="dark"] .jrow.fixed,
-[data-theme="dark"] .jnode.fixed > .jhead {
-  background: #3a2f12;
-  box-shadow: inset 0 0 0 1px #6b561f;
-}
-.jnode.fixed { background: #fffdf3; }
-[data-theme="dark"] .jnode.fixed { background: #1a1710; }
-.fix-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-  margin-right: 5px;
-  border-radius: 50%;
-  background: #f0a000;
-  color: #fff;
-  font-size: 10px;
+/* auto-repair: red inline markers showing exactly what was added / removed */
+.fix-token {
+  display: inline-block;
+  margin: 0 2px 0 5px;
+  padding: 0 5px;
+  font-family: var(--mono);
+  font-size: 11px;
   font-weight: 700;
-  line-height: 1;
+  line-height: 16px;
+  color: #e5484d;
+  background: rgba(229, 72, 77, .12);
+  border: 1px solid rgba(229, 72, 77, .5);
+  border-radius: 4px;
   vertical-align: middle;
   cursor: help;
-  flex-shrink: 0;
 }
+/* red markup for things that were removed (extra comma, comment, ...) */
+.fix-token.fix-remove {
+  text-decoration: line-through;
+  background: rgba(229, 72, 77, .05);
+  border-style: dashed;
+}
+[data-theme="dark"] .fix-token { color: #ff7b72; background: rgba(255, 123, 114, .14); border-color: rgba(255, 123, 114, .5); }
+[data-theme="dark"] .fix-token.fix-remove { background: rgba(255, 123, 114, .06); }
+
+/* subtle red left bar marking the repaired line */
+.jnode.has-fix > .jhead,
+.jrow.has-fix { box-shadow: inset 3px 0 0 rgba(229, 72, 77, .45); }
+[data-theme="dark"] .jnode.has-fix > .jhead,
+[data-theme="dark"] .jrow.has-fix { box-shadow: inset 3px 0 0 rgba(255, 123, 114, .5); }
 
 .edit-area {
   width: 100%;
