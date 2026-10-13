@@ -196,6 +196,16 @@
     const n = text.length;
     let failed = false;
     let failMsg = '';
+    // hard safety net: guarantees lenientParse always terminates
+    let guard = 0;
+    const GUARD_MAX = n * 8 + 2000;
+    function tick() {
+      if (++guard > GUARD_MAX) {
+        failed = true;
+        failMsg = 'Input is too complex or malformed to auto-repair';
+        throw new Error('PARSE_GUARD');
+      }
+    }
 
     function addFix(type, path, message, at) {
       fixes.push({ type: type, path: path.slice(), message: message, pos: (typeof at === 'number' ? at : i) });
@@ -279,6 +289,7 @@
         return word;
       }
       failed = true; failMsg = 'Unexpected character "' + c + '"';
+      i++;
       return null;
     }
 
@@ -288,6 +299,7 @@
       skipWs(path);
       if (text[i] === '}') { i++; return obj; }
       while (i < n) {
+        tick();
         skipWs(path);
         if (text[i] === '}') { i++; return obj; }
         if (text[i] === undefined) break;
@@ -334,6 +346,7 @@
       if (text[i] === ']') { i++; return arr; }
       let idx = 0;
       while (i < n) {
+        tick();
         skipWs(path);
         if (text[i] === ']') { i++; return arr; }
         if (text[i] === undefined) break;
@@ -354,12 +367,19 @@
       return arr;
     }
 
-    skipWs([]);
-    const value = parseValue([]);
-    skipWs([]);
-    if (!failed && i < n) addFix('trailing-garbage', [], 'Ignored trailing content');
-    if (failed) return { ok: false, error: { msg: failMsg } };
-    return { ok: true, value: value, fixes: fixes };
+    try {
+      skipWs([]);
+      const value = parseValue([]);
+      skipWs([]);
+      if (!failed && i < n) addFix('trailing-garbage', [], 'Ignored trailing content');
+      if (failed) return { ok: false, error: { msg: failMsg } };
+      return { ok: true, value: value, fixes: fixes };
+    } catch (e) {
+      if (e && e.message === 'PARSE_GUARD') {
+        return { ok: false, error: { msg: failMsg || 'Input could not be parsed (too deeply nested or malformed)' } };
+      }
+      throw e;
+    }
   }
 
   // strict first, then lenient auto-repair
