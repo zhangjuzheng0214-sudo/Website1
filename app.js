@@ -16,6 +16,7 @@
   const cursorPos = $('cursorPos');
   const emptyHint = $('emptyHint');
   const toastEl = $('toast');
+  const fixLayerInner = $('fixLayerInner');
 
   const themeToggle = $('themeToggle');
   const sampleBtn = $('sampleBtn');
@@ -36,6 +37,7 @@
   let mode = 'tree';
   let parseTimer = null;
   let fixMap = new Map();
+  let fixMarks = [];
   let fixLines = new Set();
 
   // ---------- helpers ----------
@@ -44,6 +46,11 @@
   }
   function pathKey(p) { return p.join('\u0000'); }
   function lineOf(text, pos) { return text.slice(0, Math.max(0, pos || 0)).split('\n').length; }
+  function colOf(text, pos) {
+    const p = Math.max(0, pos || 0);
+    const lineStart = text.lastIndexOf('\n', p - 1) + 1;
+    return text.slice(lineStart, p).replace(/\t/g, '  ').length + 1;
+  }
 
   function toast(msg, isErr) {
     toastEl.textContent = msg;
@@ -124,9 +131,7 @@
 
     highlightCode.innerHTML = lines.map((ln, idx) => {
       const n = idx + 1;
-      let cls = 'hl-line';
-      if (n === errorLine) cls += ' err';
-      else if (fixLines.has(n)) cls += ' fixline';
+      const cls = (n === errorLine) ? 'hl-line err' : 'hl-line';
       return '<div class="' + cls + '">' + highlightLine(ln) + '</div>';
     }).join('');
 
@@ -140,7 +145,36 @@
 
     charCount.textContent = text.length;
     lineCount.textContent = total;
+    renderFixLayer();
     updateCursor();
+  }
+
+  // ---------- left-side precise fix markers ----------
+  function renderFixLayer() {
+    if (!fixLayerInner) return;
+    fixLayerInner.innerHTML = '';
+    fixMarks.forEach((m) => {
+      const col = m.col - 1;
+      const row = m.line - 1;
+      const caret = document.createElement('span');
+      caret.className = 'fix-caret';
+      caret.textContent = '\u25BE';
+      caret.style.left = 'calc(var(--pad-x) + ' + col + 'ch)';
+      caret.style.top = 'calc(var(--pad-y) + var(--line-h) * ' + row + ' - 9px)';
+      fixLayerInner.appendChild(caret);
+
+      const tick = document.createElement('span');
+      tick.className = 'fix-tick';
+      tick.style.left = 'calc(var(--pad-x) + ' + col + 'ch)';
+      tick.style.top = 'calc(var(--pad-y) + var(--line-h) * ' + row + ' + var(--line-h) - 2px)';
+      fixLayerInner.appendChild(tick);
+    });
+    syncFixLayer();
+  }
+
+  function syncFixLayer() {
+    if (!fixLayerInner) return;
+    fixLayerInner.style.transform = 'translate(' + (-input.scrollLeft) + 'px,' + (-input.scrollTop) + 'px)';
   }
 
   function markErrorLine(line) { errorLine = line || 0; renderEditor(); }
@@ -163,8 +197,8 @@
     let failed = false;
     let failMsg = '';
 
-    function addFix(type, path, message) {
-      fixes.push({ type: type, path: path.slice(), message: message, pos: i });
+    function addFix(type, path, message, at) {
+      fixes.push({ type: type, path: path.slice(), message: message, pos: (typeof at === 'number' ? at : i) });
     }
 
     function skipWs(path) {
@@ -260,32 +294,34 @@
         if (text[i] === ',') { addFix('duplicate-comma', path, 'Removed extra comma'); i++; continue; }
         let key = null;
         const kc = text[i];
+        const atKey = i;
+        const singleKey = (kc === "'");
         if (kc === '"' || kc === "'") {
-          if (kc === "'") addFix('single-quote', path, 'Converted single quotes to double quotes');
           key = parseString(path);
+          if (singleKey) addFix('single-quote', path.concat(key), 'Converted single quotes to double quotes', atKey);
         } else if (/[A-Za-z0-9_$]/.test(kc)) {
           const start = i;
           while (i < n && !/[:\s,}\]]/.test(text[i])) i++;
           key = text.slice(start, i);
-          addFix('unquoted-key', path, 'Added quotes to key "' + key + '"');
+          addFix('unquoted-key', path.concat(key), 'Added quotes to key "' + key + '"', start);
         } else {
           failed = true; failMsg = 'Unexpected character "' + kc + '" in object';
           return obj;
         }
         skipWs(path);
         if (text[i] === ':') { i++; }
-        else { addFix('missing-colon', path, 'Inserted ":" after key "' + key + '"'); }
+        else { addFix('missing-colon', path.concat(key), 'Inserted ":" after key "' + key + '"'); }
         obj[key] = parseValue(path.concat(key));
         skipWs(path);
         const c = text[i];
         if (c === ',') {
           i++; skipWs(path);
-          if (text[i] === '}') { addFix('trailing-comma', path, 'Removed trailing comma'); i++; return obj; }
-          while (text[i] === ',') { addFix('duplicate-comma', path, 'Removed extra comma'); i++; }
+          if (text[i] === '}') { addFix('trailing-comma', path.concat(key), 'Removed trailing comma'); i++; return obj; }
+          while (text[i] === ',') { addFix('duplicate-comma', path.concat(key), 'Removed extra comma'); i++; }
           continue;
         } else if (c === '}') { i++; return obj; }
         else if (c === undefined) { addFix('unterminated', path, 'Added missing "}"'); return obj; }
-        else { addFix('missing-comma', path, 'Inserted missing comma'); continue; }
+        else { addFix('missing-comma', path.concat(key), 'Inserted missing comma'); continue; }
       }
       addFix('unterminated', path, 'Added missing "}"');
       return obj;
@@ -301,18 +337,18 @@
         skipWs(path);
         if (text[i] === ']') { i++; return arr; }
         if (text[i] === undefined) break;
-        if (text[i] === ',') { addFix('duplicate-comma', path, 'Removed extra comma'); while (text[i] === ',') i++; continue; }
+        if (text[i] === ',') { addFix('duplicate-comma', idx > 0 ? path.concat(idx - 1) : path, 'Removed extra comma'); while (text[i] === ',') i++; continue; }
         arr.push(parseValue(path.concat(idx)));
         idx++;
         skipWs(path);
         const c = text[i];
         if (c === ',') {
           i++; skipWs(path);
-          if (text[i] === ']') { addFix('trailing-comma', path, 'Removed trailing comma'); i++; return arr; }
+          if (text[i] === ']') { addFix('trailing-comma', path.concat(idx - 1), 'Removed trailing comma'); i++; return arr; }
           continue;
         } else if (c === ']') { i++; return arr; }
         else if (c === undefined) { addFix('unterminated', path, 'Added missing "]"'); return arr; }
-        else { addFix('missing-comma', path, 'Inserted missing comma'); continue; }
+        else { addFix('missing-comma', path.concat(idx - 1), 'Inserted missing comma'); continue; }
       }
       addFix('unterminated', path, 'Added missing "]"');
       return arr;
@@ -569,6 +605,7 @@
     if (text.trim() === '') {
       tree.innerHTML = '';
       errorLine = 0;
+      fixMarks = [];
       fixLines = new Set();
       renderEditor();
       setStatus('Empty input — paste some JSON.', '');
@@ -581,9 +618,14 @@
       renderTree(res.value, res.fixes);
       showTree();
       errorLine = 0;
+      fixMarks = [];
       fixLines = new Set();
       (res.fixes || []).forEach((f) => {
-        if (typeof f.pos === 'number') fixLines.add(lineOf(text, f.pos));
+        if (typeof f.pos === 'number') {
+          const ln = lineOf(text, f.pos);
+          fixLines.add(ln);
+          fixMarks.push({ line: ln, col: colOf(text, f.pos), type: f.type });
+        }
       });
       renderEditor();
       const fx = res.fixes ? res.fixes.length : 0;
@@ -593,6 +635,7 @@
         setStatus('Valid JSON — ' + countKeys(res.value) + ' keys formatted.', 'ok');
       }
     } else {
+      fixMarks = [];
       fixLines = new Set();
       const e = parseJSON(text);
       const err = (e.ok ? null : e.error) || { line: 0, col: 0, msg: (res.error && res.error.msg) || 'Invalid JSON' };
@@ -695,6 +738,7 @@
     highlight.scrollTop = input.scrollTop;
     highlight.scrollLeft = input.scrollLeft;
     gutter.scrollTop = input.scrollTop;
+    syncFixLayer();
   });
   input.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); runFormat(); }
@@ -725,6 +769,7 @@
     input.value = '';
     tree.innerHTML = '';
     errorLine = 0;
+    fixMarks = [];
     fixLines = new Set();
     renderEditor();
     setStatus('Cleared.', '');
