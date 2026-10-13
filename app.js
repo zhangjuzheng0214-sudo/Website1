@@ -10,16 +10,17 @@
   const gutter = $('gutter');
   const tree = $('tree');
   const editArea = $('editArea');
-  const output = $('output');
   const statusMsg = $('statusMsg');
   const charCount = $('charCount');
   const lineCount = $('lineCount');
+  const cursorPos = $('cursorPos');
   const emptyHint = $('emptyHint');
   const toastEl = $('toast');
 
   const themeToggle = $('themeToggle');
   const sampleBtn = $('sampleBtn');
   const clearBtn = $('clearBtn');
+  const minifyLeftBtn = $('minifyLeftBtn');
   const copyInBtn = $('copyInBtn');
   const downloadInBtn = $('downloadInBtn');
   const formatBtn = $('formatBtn');
@@ -32,8 +33,28 @@
 
   let errorLine = 0;
   let lastFormatted = '';
-  let mode = 'tree'; // 'tree' | 'edit'
+  let mode = 'tree';
   let parseTimer = null;
+  let fixMap = new Map();
+
+  // ---------- helpers ----------
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function pathKey(p) { return p.join('\u0000'); }
+
+  function toast(msg, isErr) {
+    toastEl.textContent = msg;
+    toastEl.style.background = isErr ? 'var(--danger)' : 'var(--text)';
+    toastEl.classList.add('show');
+    clearTimeout(toastEl._t);
+    toastEl._t = setTimeout(() => toastEl.classList.remove('show'), 2000);
+  }
+
+  function setStatus(msg, kind) {
+    statusMsg.textContent = msg;
+    statusMsg.className = 'status-msg' + (kind ? ' ' + kind : '');
+  }
 
   // ---------- theme ----------
   function applyTheme(t) {
@@ -53,24 +74,6 @@
     applyTheme(cur === 'dark' ? 'light' : 'dark');
   });
 
-  // ---------- helpers ----------
-  function esc(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-
-  function toast(msg, isErr) {
-    toastEl.textContent = msg;
-    toastEl.style.background = isErr ? 'var(--danger)' : 'var(--text)';
-    toastEl.classList.add('show');
-    clearTimeout(toastEl._t);
-    toastEl._t = setTimeout(() => toastEl.classList.remove('show'), 1900);
-  }
-
-  function setStatus(msg, kind) {
-    statusMsg.textContent = msg;
-    statusMsg.className = 'status-msg' + (kind ? ' ' + kind : '');
-  }
-
   // ---------- syntax highlight (line based) ----------
   function highlightLine(line) {
     let out = '';
@@ -78,15 +81,13 @@
     const n = line.length;
     while (i < n) {
       const c = line[i];
-      if (c === '"') {
+      if (c === '"' || c === "'") {
+        const q = c;
         let j = i + 1;
         let str = c;
         while (j < n) {
-          if (line[j] === '\\') {
-            str += line[j];
-            if (j + 1 < n) { str += line[j + 1]; j += 2; continue; }
-            j++; break;
-          } else if (line[j] === '"') { str += line[j]; j++; break; }
+          if (line[j] === '\\') { str += line[j]; if (j + 1 < n) { str += line[j + 1]; j += 2; continue; } j++; break; }
+          else if (line[j] === q) { str += line[j]; j++; break; }
           else { str += line[j]; j++; }
         }
         let k = j;
@@ -95,8 +96,7 @@
         else out += '<span class="tk-str">' + esc(str) + '</span>';
         i = j;
       } else if (c === '-' || (c >= '0' && c <= '9')) {
-        let j = i;
-        let num = '';
+        let j = i; let num = '';
         if (c === '-') { num += '-'; j++; }
         while (j < n && /[0-9.eE+-]/.test(line[j])) { num += line[j]; j++; }
         out += '<span class="tk-num">' + esc(num) + '</span>';
@@ -106,11 +106,9 @@
         out += '<span class="tk-bool">' + kw + '</span>';
         i += kw.length;
       } else if ('{}[],:'.includes(c)) {
-        out += '<span class="tk-punct">' + esc(c) + '</span>';
-        i++;
+        out += '<span class="tk-punct">' + esc(c) + '</span>'; i++;
       } else {
-        out += esc(c);
-        i++;
+        out += esc(c); i++;
       }
     }
     return out;
@@ -134,17 +132,203 @@
 
     charCount.textContent = text.length;
     lineCount.textContent = total;
+    updateCursor();
   }
 
-  function markErrorLine(line) {
-    errorLine = line || 0;
-    renderEditor();
-  }
-  function clearErrorLine() {
-    if (errorLine !== 0) { errorLine = 0; renderEditor(); }
+  function markErrorLine(line) { errorLine = line || 0; renderEditor(); }
+  function clearErrorLine() { if (errorLine !== 0) { errorLine = 0; renderEditor(); } }
+
+  // ---------- cursor position ----------
+  function updateCursor() {
+    if (!cursorPos) return;
+    const pos = input.selectionStart || 0;
+    const before = input.value.slice(0, pos);
+    const line = before.split('\n').length;
+    const col = pos - before.lastIndexOf('\n');
+    cursorPos.textContent = 'Ln ' + line + ', Col ' + col;
   }
 
-  // ---------- parse ----------
+  // ---------- lenient (auto-repair) parser ----------
+  function lenientParse(text) {
+    const fixes = [];
+    let i = 0;
+    const n = text.length;
+    let failed = false;
+    let failMsg = '';
+
+    function addFix(type, path, message) {
+      fixes.push({ type: type, path: path.slice(), message: message });
+    }
+
+    function skipWs(path) {
+      while (i < n) {
+        const c = text[i];
+        if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\u00a0' || c === '\ufeff') { i++; continue; }
+        if (c === '/' && text[i + 1] === '/') {
+          while (i < n && text[i] !== '\n') i++;
+          addFix('comment', path, 'Removed line comment');
+          continue;
+        }
+        if (c === '/' && text[i + 1] === '*') {
+          i += 2;
+          while (i < n && !(text[i] === '*' && text[i + 1] === '/')) i++;
+          i += 2;
+          addFix('comment', path, 'Removed block comment');
+          continue;
+        }
+        break;
+      }
+    }
+
+    function parseString(path) {
+      const quote = text[i];
+      i++;
+      let out = '';
+      while (i < n) {
+        const c = text[i];
+        if (c === '\\') {
+          const e = text[i + 1];
+          i += 2;
+          if (e === 'n') out += '\n';
+          else if (e === 't') out += '\t';
+          else if (e === 'r') out += '\r';
+          else if (e === 'b') out += '\b';
+          else if (e === 'f') out += '\f';
+          else if (e === 'u') { const hex = text.slice(i, i + 4); out += String.fromCharCode(parseInt(hex, 16) || 0); i += 4; }
+          else out += (e === undefined ? '' : e);
+          continue;
+        }
+        if (c === quote) { i++; return out; }
+        out += c; i++;
+      }
+      addFix('unterminated', path, 'Closed unterminated string');
+      return out;
+    }
+
+    function parseNumber(path) {
+      const start = i;
+      if (text[i] === '+' ) i++;
+      if (text[i] === '-') i++;
+      while (i < n && /[0-9.eE+\-]/.test(text[i])) i++;
+      const raw = text.slice(start, i);
+      let num = Number(raw);
+      if (isNaN(num)) { addFix('bad-number', path, 'Fixed invalid number "' + raw + '"'); num = 0; }
+      return num;
+    }
+
+    function parseValue(path) {
+      skipWs(path);
+      if (i >= n) { failed = true; failMsg = 'Unexpected end of input'; return null; }
+      const c = text[i];
+      if (c === '{') return parseObject(path);
+      if (c === '[') return parseArray(path);
+      if (c === '"') return parseString(path);
+      if (c === "'") { addFix('single-quote', path, 'Converted single quotes to double quotes'); return parseString(path); }
+      if (c === '-' || c === '+' || (c >= '0' && c <= '9')) return parseNumber(path);
+      if (text.startsWith('true', i)) { i += 4; return true; }
+      if (text.startsWith('false', i)) { i += 5; return false; }
+      if (text.startsWith('null', i)) { i += 4; return null; }
+      if (text.startsWith('undefined', i)) { i += 9; addFix('unquoted-value', path, 'Replaced "undefined" with null'); return null; }
+      if (text.startsWith('NaN', i)) { i += 3; addFix('unquoted-value', path, 'Replaced "NaN" with null'); return null; }
+      if (/[A-Za-z_$]/.test(c)) {
+        const start = i;
+        while (i < n && !/[,}\]\s:]/.test(text[i])) i++;
+        const word = text.slice(start, i);
+        addFix('unquoted-value', path, 'Quoted bare value "' + word + '"');
+        return word;
+      }
+      failed = true; failMsg = 'Unexpected character "' + c + '"';
+      return null;
+    }
+
+    function parseObject(path) {
+      const obj = {};
+      i++;
+      skipWs(path);
+      if (text[i] === '}') { i++; return obj; }
+      while (i < n) {
+        skipWs(path);
+        if (text[i] === '}') { i++; return obj; }
+        if (text[i] === undefined) break;
+        if (text[i] === ',') { addFix('duplicate-comma', path, 'Removed extra comma'); i++; continue; }
+        let key = null;
+        const kc = text[i];
+        if (kc === '"' || kc === "'") {
+          if (kc === "'") addFix('single-quote', path, 'Converted single quotes to double quotes');
+          key = parseString(path);
+        } else if (/[A-Za-z0-9_$]/.test(kc)) {
+          const start = i;
+          while (i < n && !/[:\s,}\]]/.test(text[i])) i++;
+          key = text.slice(start, i);
+          addFix('unquoted-key', path, 'Added quotes to key "' + key + '"');
+        } else {
+          failed = true; failMsg = 'Unexpected character "' + kc + '" in object';
+          return obj;
+        }
+        skipWs(path);
+        if (text[i] === ':') { i++; }
+        else { addFix('missing-colon', path, 'Inserted ":" after key "' + key + '"'); }
+        obj[key] = parseValue(path.concat(key));
+        skipWs(path);
+        const c = text[i];
+        if (c === ',') {
+          i++; skipWs(path);
+          if (text[i] === '}') { addFix('trailing-comma', path, 'Removed trailing comma'); i++; return obj; }
+          while (text[i] === ',') { addFix('duplicate-comma', path, 'Removed extra comma'); i++; }
+          continue;
+        } else if (c === '}') { i++; return obj; }
+        else if (c === undefined) { addFix('unterminated', path, 'Added missing "}"'); return obj; }
+        else { addFix('missing-comma', path, 'Inserted missing comma'); continue; }
+      }
+      addFix('unterminated', path, 'Added missing "}"');
+      return obj;
+    }
+
+    function parseArray(path) {
+      const arr = [];
+      i++;
+      skipWs(path);
+      if (text[i] === ']') { i++; return arr; }
+      let idx = 0;
+      while (i < n) {
+        skipWs(path);
+        if (text[i] === ']') { i++; return arr; }
+        if (text[i] === undefined) break;
+        if (text[i] === ',') { addFix('duplicate-comma', path, 'Removed extra comma'); while (text[i] === ',') i++; continue; }
+        arr.push(parseValue(path.concat(idx)));
+        idx++;
+        skipWs(path);
+        const c = text[i];
+        if (c === ',') {
+          i++; skipWs(path);
+          if (text[i] === ']') { addFix('trailing-comma', path, 'Removed trailing comma'); i++; return arr; }
+          continue;
+        } else if (c === ']') { i++; return arr; }
+        else if (c === undefined) { addFix('unterminated', path, 'Added missing "]"'); return arr; }
+        else { addFix('missing-comma', path, 'Inserted missing comma'); continue; }
+      }
+      addFix('unterminated', path, 'Added missing "]"');
+      return arr;
+    }
+
+    skipWs([]);
+    const value = parseValue([]);
+    skipWs([]);
+    if (!failed && i < n) addFix('trailing-garbage', [], 'Ignored trailing content');
+    if (failed) return { ok: false, error: { msg: failMsg } };
+    return { ok: true, value: value, fixes: fixes };
+  }
+
+  // strict first, then lenient auto-repair
+  function parseJSONLoose(text) {
+    try {
+      return { ok: true, value: JSON.parse(text), fixes: [] };
+    } catch (e) {
+      return lenientParse(text);
+    }
+  }
+
+  // strict parse just for error messages
   function parseJSON(text) {
     try {
       return { ok: true, value: JSON.parse(text) };
@@ -156,8 +340,7 @@
         const pos = parseInt(mPos[1], 10);
         const before = text.slice(0, pos);
         line = before.split('\n').length;
-        const nl = before.lastIndexOf('\n');
-        col = pos - nl;
+        col = pos - before.lastIndexOf('\n');
       } else {
         const mLC = msg.match(/line (\d+) column (\d+)/i);
         if (mLC) { line = parseInt(mLC[1], 10); col = parseInt(mLC[2], 10); }
@@ -169,8 +352,7 @@
   function cleanMsg(msg) {
     return msg
       .replace(/ in JSON at position \d+/, '')
-      .replace(/^JSON\.parse:\s*/, '')
-      .replace(/^\w+ (.*)$/, '$1');
+      .replace(/^JSON\.parse:\s*/, '');
   }
 
   function countKeys(v) {
@@ -193,27 +375,47 @@
   }
   function span(cls, text) { return el('span', cls, text); }
 
-  function renderValue(value) {
+  function applyFix(node, path) {
+    const fx = fixMap.get(pathKey(path));
+    if (fx && fx.length) {
+      node.classList.add('fixed');
+      const t = fx.map((f) => 'Auto-fixed: ' + f.message).join('\n');
+      node.title = t;
+      const mark = el('span', 'fix-mark', '!');
+      mark.title = t;
+      node.insertBefore(mark, node.firstChild);
+    }
+  }
+
+  function renderValue(value, path) {
     if (value === null) return span('tk-bool', 'null');
     const t = typeof value;
     if (t === 'object') {
-      return Array.isArray(value) ? renderArray(value, undefined, false) : renderObject(value, undefined, false);
+      return Array.isArray(value) ? renderArray(value, undefined, false, path) : renderObject(value, undefined, false, path);
     }
     if (t === 'string') return span('tk-str', JSON.stringify(value));
     if (t === 'number') return span('tk-num', String(value));
     if (t === 'boolean') return span('tk-bool', String(value));
-    return span('', 'undefined');
+    return span('', String(value));
   }
 
-  function makeNode(openCh, closeCh, label, body, previewText, trailingComma) {
+  function labelParts(keyName) {
+    const d = el('div');
+    d.appendChild(span('tk-key', JSON.stringify(keyName)));
+    d.appendChild(span('tk-punct', ': '));
+    return d;
+  }
+
+  function makeNode(openCh, closeCh, label, body, previewText, trailingComma, path) {
     const wrap = el('div', 'jnode');
     const head = el('div', 'jhead');
-    if (label) head.appendChild(label);
+    if (label) label.childNodes.forEach((c) => head.appendChild(c.cloneNode(true)));
     const tg = el('span', 'toggle', '▼');
-    const open = span('tk-punct', openCh);
+    head.appendChild(tg);
+    head.appendChild(span('tk-punct', openCh));
     const prev = el('span', 'jpreview', ' … ' + previewText + ' ');
     prev.style.display = 'none';
-    head.appendChild(tg); head.appendChild(open); head.appendChild(prev);
+    head.appendChild(prev);
     wrap.appendChild(head);
 
     const b = el('div', 'jbody');
@@ -225,6 +427,7 @@
     if (trailingComma) foot.appendChild(span('tk-punct', ','));
     wrap.appendChild(foot);
 
+    applyFix(wrap, path);
     tg.addEventListener('click', () => {
       const collapsed = wrap.classList.toggle('collapsed');
       tg.textContent = collapsed ? '▶' : '▼';
@@ -233,69 +436,75 @@
     return wrap;
   }
 
-  function renderObject(obj, keyName, trailingComma) {
-    const keys = Object.keys(obj);
-    const label = keyName !== undefined
-      ? (function () { const d = el('div'); d.appendChild(span('tk-key', JSON.stringify(keyName))); d.appendChild(span('tk-punct', ': ')); return d; })()
-      : null;
-
-    if (keys.length === 0) {
-      const line = el('div', 'jrow');
-      if (label) label.childNodes.forEach((c) => line.appendChild(c.cloneNode(true)));
-      line.appendChild(span('tk-punct', '{ }'));
-      if (trailingComma) line.appendChild(span('tk-punct', ','));
-      return line;
+  function scalarRow(keyName, value, trailingComma, path) {
+    const row = el('div', 'jrow');
+    if (keyName !== undefined) {
+      row.appendChild(span('tk-key', JSON.stringify(keyName)));
+      row.appendChild(span('tk-punct', ': '));
     }
+    row.appendChild(renderValue(value, path));
+    if (trailingComma) row.appendChild(span('tk-punct', ','));
+    applyFix(row, path);
+    return row;
+  }
+
+  function renderObject(obj, keyName, trailingComma, path) {
+    const keys = Object.keys(obj);
+    const label = keyName !== undefined ? labelParts(keyName) : null;
+    if (keys.length === 0) return emptyRow('{ }', keyName, trailingComma, path);
 
     const body = [];
     keys.forEach((k, idx) => {
       const last = idx === keys.length - 1;
       const v = obj[k];
+      const cpath = path.concat(k);
       if (v !== null && typeof v === 'object') {
-        body.push(Array.isArray(v) ? renderArray(v, k, !last) : renderObject(v, k, !last));
+        body.push(Array.isArray(v) ? renderArray(v, k, !last, cpath) : renderObject(v, k, !last, cpath));
       } else {
-        const row = el('div', 'jrow');
-        row.appendChild(span('tk-key', JSON.stringify(k)));
-        row.appendChild(span('tk-punct', ': '));
-        row.appendChild(renderValue(v));
-        if (!last) row.appendChild(span('tk-punct', ','));
-        body.push(row);
+        body.push(scalarRow(k, v, !last, cpath));
       }
     });
-    return makeNode('{', '}', label, body, keys.length + ' ' + (keys.length === 1 ? 'key' : 'keys'), trailingComma);
+    return makeNode('{', '}', label, body, keys.length + ' ' + (keys.length === 1 ? 'key' : 'keys'), trailingComma, path);
   }
 
-  function renderArray(arr, keyName, trailingComma) {
-    const label = keyName !== undefined
-      ? (function () { const d = el('div'); d.appendChild(span('tk-key', JSON.stringify(keyName))); d.appendChild(span('tk-punct', ': ')); return d; })()
-      : null;
-
-    if (arr.length === 0) {
-      const line = el('div', 'jrow');
-      if (label) label.childNodes.forEach((c) => line.appendChild(c.cloneNode(true)));
-      line.appendChild(span('tk-punct', '[ ]'));
-      if (trailingComma) line.appendChild(span('tk-punct', ','));
-      return line;
-    }
+  function renderArray(arr, keyName, trailingComma, path) {
+    const label = keyName !== undefined ? labelParts(keyName) : null;
+    if (arr.length === 0) return emptyRow('[ ]', keyName, trailingComma, path);
 
     const body = [];
     arr.forEach((item, idx) => {
       const last = idx === arr.length - 1;
+      const cpath = path.concat(idx);
       if (item !== null && typeof item === 'object') {
-        body.push(Array.isArray(item) ? renderArray(item, undefined, !last) : renderObject(item, undefined, !last));
+        body.push(Array.isArray(item) ? renderArray(item, undefined, !last, cpath) : renderObject(item, undefined, !last, cpath));
       } else {
-        const row = el('div', 'jrow');
-        row.appendChild(renderValue(item));
-        if (!last) row.appendChild(span('tk-punct', ','));
-        body.push(row);
+        body.push(scalarRow(undefined, item, !last, cpath));
       }
     });
-    return makeNode('[', ']', label, body, arr.length + ' ' + (arr.length === 1 ? 'item' : 'items'), trailingComma);
+    return makeNode('[', ']', label, body, arr.length + ' ' + (arr.length === 1 ? 'item' : 'items'), trailingComma, path);
   }
 
-  function renderTree(value) {
+  function emptyRow(braces, keyName, trailingComma, path) {
+    const row = el('div', 'jrow');
+    if (keyName !== undefined) {
+      row.appendChild(span('tk-key', JSON.stringify(keyName)));
+      row.appendChild(span('tk-punct', ': '));
+    }
+    row.appendChild(span('tk-punct', braces));
+    if (trailingComma) row.appendChild(span('tk-punct', ','));
+    applyFix(row, path);
+    return row;
+  }
+
+  function renderTree(value, fixes) {
+    fixMap = new Map();
+    (fixes || []).forEach((f) => {
+      const k = pathKey(f.path);
+      if (!fixMap.has(k)) fixMap.set(k, []);
+      fixMap.get(k).push(f);
+    });
     tree.innerHTML = '';
-    tree.appendChild(renderValue(value));
+    tree.appendChild(renderValue(value, []));
   }
 
   // ---------- view modes ----------
@@ -333,23 +542,46 @@
       emptyHint.hidden = false;
       return;
     }
-    const res = parseJSON(text);
+    const res = parseJSONLoose(text);
     if (res.ok) {
       lastFormatted = JSON.stringify(res.value, null, 2);
-      renderTree(res.value);
+      renderTree(res.value, res.fixes);
       showTree();
-      setStatus('Valid JSON — ' + countKeys(res.value) + ' keys formatted.', 'ok');
       clearErrorLine();
+      const fx = res.fixes ? res.fixes.length : 0;
+      if (fx > 0) {
+        setStatus('Auto-repaired ' + fx + ' issue' + (fx > 1 ? 's' : '') + ' — highlighted in yellow on the right.', 'warn');
+      } else {
+        setStatus('Valid JSON — ' + countKeys(res.value) + ' keys formatted.', 'ok');
+      }
     } else {
-      markErrorLine(res.error.line);
-      const at = res.error.line ? 'line ' + res.error.line + (res.error.col ? ', col ' + res.error.col : '') : '';
-      setStatus('Invalid JSON' + (at ? ' at ' + at : '') + ': ' + cleanMsg(res.error.msg), 'err');
+      const e = parseJSON(text);
+      const err = (e.ok ? null : e.error) || { line: 0, col: 0, msg: (res.error && res.error.msg) || 'Invalid JSON' };
+      markErrorLine(err.line);
+      const at = err.line ? 'line ' + err.line + (err.col ? ', col ' + err.col : '') : '';
+      setStatus('Invalid JSON' + (at ? ' at ' + at : '') + ': ' + cleanMsg(err.msg), 'err');
+    }
+  }
+
+  function runMinifyLeft() {
+    const text = input.value;
+    if (!text.trim()) { toast('Nothing to minify', true); return; }
+    const res = parseJSONLoose(text);
+    if (res.ok) {
+      const before = text.length;
+      input.value = JSON.stringify(res.value);
+      renderEditor();
+      runFormat();
+      input.focus();
+      toast('Minified: ' + before + ' → ' + input.value.length + ' chars');
+    } else {
+      toast('Cannot minify — JSON looks broken', true);
     }
   }
 
   function runMinify() {
     const text = editArea.value;
-    const res = parseJSON(text);
+    const res = parseJSONLoose(text);
     if (res.ok) {
       input.value = JSON.stringify(res.value);
       renderEditor();
@@ -364,6 +596,7 @@
     tree.querySelectorAll('.jnode').forEach((node) => {
       const tg = node.querySelector('.toggle');
       const prev = node.querySelector('.jpreview');
+      if (!tg) return;
       if (c && !node.classList.contains('collapsed')) {
         node.classList.add('collapsed'); tg.textContent = '▶'; if (prev) prev.style.display = 'inline';
       } else if (!c && node.classList.contains('collapsed')) {
@@ -407,7 +640,8 @@
     author: { name: 'Li', city: 'Ningbo', social: null },
     features: [
       { id: 1, label: 'Foldable tree' },
-      { id: 2, label: 'Error highlight' }
+      { id: 2, label: 'Error highlight' },
+      { id: 3, label: 'Auto-fix' }
     ],
     note: 'Edit on the left, fold on the right.'
   };
@@ -426,12 +660,17 @@
   input.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); runFormat(); }
   });
+  ['keyup', 'click', 'input'].forEach((ev) => input.addEventListener(ev, updateCursor));
+  document.addEventListener('selectionchange', () => {
+    if (document.activeElement === input) updateCursor();
+  });
 
   editArea.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); runMinify(); }
   });
 
   formatBtn.addEventListener('click', runFormat);
+  minifyLeftBtn.addEventListener('click', runMinifyLeft);
   minifyBtn.addEventListener('click', runMinify);
   editToggle.addEventListener('click', () => { if (mode === 'tree') showEdit(); else showTree(); });
   collapseAllBtn.addEventListener('click', () => setAllCollapsed(true));
@@ -445,7 +684,6 @@
   });
   clearBtn.addEventListener('click', () => {
     input.value = '';
-    renderEditor();
     tree.innerHTML = '';
     errorLine = 0;
     renderEditor();
@@ -458,7 +696,35 @@
   downloadInBtn.addEventListener('click', () => downloadText(input.value, 'input.json'));
   downloadOutBtn.addEventListener('click', () => downloadText(mode === 'edit' ? editArea.value : lastFormatted, 'output.json'));
 
+  // ---------- self test (?selftest=1) ----------
+  function runSelfTest() {
+    const cases = [
+      { name: 'trailing comma', input: '{"a":1,}' },
+      { name: 'missing comma', input: '{"a":1 "b":2}' },
+      { name: 'single quotes', input: "{'a':'x'}" },
+      { name: 'unquoted key', input: '{a:1, b:2}' },
+      { name: 'double comma', input: '[1,,2]' },
+      { name: 'bare value', input: '{a:hello}' },
+      { name: 'line comment', input: '{"a":1} // note' },
+      { name: 'unterminated obj', input: '{"a":1' },
+      { name: 'array missing comma', input: '[1 2 3]' },
+      { name: 'valid strict', input: '{"a":[1,2,{"b":true}]}' },
+      { name: 'broken beyond repair', input: '@@@' }
+    ];
+    let out = '';
+    cases.forEach((c) => {
+      const r = parseJSONLoose(c.input);
+      out += (r.ok ? 'OK  ' : 'FAIL') + ' fixes=' + (r.ok && r.fixes ? r.fixes.length : 'n/a') +
+        ' value=' + (r.ok ? JSON.stringify(r.value) : '(unrepaired)') + '  << ' + c.name + '\n';
+    });
+    document.body.innerHTML = '<pre id="selftest">' + esc(out) + '</pre>';
+  }
+
   // ---------- init ----------
+  if (location.search.indexOf('selftest') !== -1) {
+    runSelfTest();
+    return;
+  }
   input.value = JSON.stringify(SAMPLE, null, 2);
   renderEditor();
   runFormat();

@@ -236,6 +236,8 @@ body {
 .status-msg { color: var(--text-2); }
 .status-msg.err { color: var(--danger); font-weight: 500; }
 .status-msg.ok { color: var(--ok); }
+.status-msg.warn { color: #b5730a; font-weight: 500; }
+[data-theme="dark"] .status-msg.warn { color: #f0b45c; }
 .status-meta { color: var(--text-3); white-space: nowrap; }
 
 /* ===== Panel action ===== */
@@ -274,6 +276,37 @@ body {
 .jnode.collapsed > .jbody,
 .jnode.collapsed > .jfoot { display: none; }
 .jpreview { color: var(--text-3); }
+
+/* auto-repaired node highlight */
+.jrow.fixed, .jnode.fixed > .jhead {
+  background: #fff6d6;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px #f4d97a;
+}
+[data-theme="dark"] .jrow.fixed,
+[data-theme="dark"] .jnode.fixed > .jhead {
+  background: #3a2f12;
+  box-shadow: inset 0 0 0 1px #6b561f;
+}
+.jnode.fixed { background: #fffdf3; }
+[data-theme="dark"] .jnode.fixed { background: #1a1710; }
+.fix-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: #f0a000;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: middle;
+  cursor: help;
+  flex-shrink: 0;
+}
 
 .edit-area {
   width: 100%;
